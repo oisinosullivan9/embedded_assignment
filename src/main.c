@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -14,22 +15,91 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define ADC_CHANNEL ADC_CHANNEL_0 // GPIO36 (A0) corresponds to ADC_CHANNEL_0
-#define ADC_UNIT ADC_UNIT_1 // Using ADC Unit 1
-#define LM35_MV_PER_DEG_C 10 // LM35 outputs 10mV per degree Celsius
-#define LED_GPIO GPIO_NUM_2 // Built-in LED on most ESP32 boards
-#define WIFI_SSID "AndroidAP7681" // Replace with your Wi-Fi SSID
-#define WIFI_PASSWORD "87654321" // Replace with your Wi-Fi password
+// Configuration Definitions
+#define ADC_CHANNEL ADC_CHANNEL_0
+#define ADC_UNIT ADC_UNIT_1
+#define LM35_MV_PER_DEG_C 10
+#define LED_GPIO GPIO_NUM_2
+#define WIFI_SSID "AndroidAP7681"
+#define WIFI_PASSWORD "87654321"
 #define COLLECTOR_IP "192.168.155.61"
 #define COLLECTOR_PORT 12345
 
+// Task Priorities
+#define DATA_ACQUISITION_PRIORITY (configMAX_PRIORITIES - 1)
+#define NETWORK_AGENT_PRIORITY (configMAX_PRIORITIES - 2)
+
+// Queue Configuration
+#define QUEUE_LENGTH 10
+#define QUEUE_ITEM_SIZE sizeof(TemperatureData)
+
+// Logging Tag
+static const char *TAG = "TemperatureMonitor";
+
+// Global Handles
 static adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle;
-static const char *TAG = "WiFi_Connect";
-
 int udp_socket;
 struct sockaddr_in collector_addr;
 
+// Bi-directional Queues
+QueueHandle_t temperatureDataQueue;
+QueueHandle_t networkResponseQueue;
+
+// Temperature Data Structure
+typedef struct {
+    float temperature;
+    uint32_t timestamp;
+    bool sendSuccess;
+} TemperatureData;
+
+// WiFi Event Handler
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, 
+                                int32_t event_id, void *event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGI(TAG, "Disconnected. Reconnecting...");
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+// WiFi Initialization
+void wifi_init_sta() {
+    ESP_LOGI(TAG, "Initializing Wi-Fi...");
+
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, 
+                                        &wifi_event_handler, NULL, &instance_any_id);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, 
+                                        &wifi_event_handler, NULL, &instance_got_ip);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+    esp_wifi_start();
+}
+
+// ADC Initialization
 void init_adc() {
     adc_oneshot_unit_init_cfg_t unit_cfg = {
         .unit_id = ADC_UNIT,
@@ -51,11 +121,20 @@ void init_adc() {
     adc_cali_create_scheme_line_fitting(&cali_cfg, &cali_handle);
 }
 
+// LED Initialization
 void init_led() {
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 }
 
+// LED Flashing
+void flash_led() {
+    gpio_set_level(LED_GPIO, 1); // Turn LED on
+    vTaskDelay(pdMS_TO_TICKS(500)); // Shorter delay for visual feedback
+    gpio_set_level(LED_GPIO, 0); // Turn LED off
+}
+
+// Temperature Reading
 float read_temperature() {
     int raw_adc = 0;
     adc_oneshot_read(adc_handle, ADC_CHANNEL, &raw_adc);
@@ -68,53 +147,7 @@ float read_temperature() {
     return temperature;
 }
 
-void flash_led() {
-    gpio_set_level(LED_GPIO, 1); // Turn LED on
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
-    gpio_set_level(LED_GPIO, 0); // Turn LED off
-}
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI(TAG, "Disconnected. Reconnecting...");
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
-
-void wifi_init_sta() {
-    ESP_LOGI(TAG, "Initializing Wi-Fi...");
-
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
-    esp_wifi_start();
-}
-
+// UDP Socket Initialization
 void init_udp_socket() {
     udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (udp_socket < 0) {
@@ -130,33 +163,90 @@ void init_udp_socket() {
     ESP_LOGI(TAG, "UDP socket created");
 }
 
-void send_temperature(float temperature) {
-    char message[64];
-    snprintf(message, sizeof(message), "Temperature: %.2f C\n", temperature);
+// Data Acquisition Task
+void data_acquisition_task(void *pvParameters) {
+    TemperatureData tempData;
     
-    sendto(udp_socket, message, strlen(message), 0, (struct sockaddr *)&collector_addr, sizeof(collector_addr));
+    while (1) {
+        // Read temperature
+        tempData.temperature = read_temperature();
+        tempData.timestamp = xTaskGetTickCount();
+        tempData.sendSuccess = false;
+
+        // Flash LED
+        flash_led();
+
+        // Send to network agent queue
+        if (xQueueSend(temperatureDataQueue, &tempData, pdMS_TO_TICKS(100)) != pdTRUE) {
+            ESP_LOGW(TAG, "Temperature queue full, data dropped");
+        }
+
+        // Optional: Check for network agent response
+        TemperatureData responseData;
+        if (xQueueReceive(networkResponseQueue, &responseData, 0) == pdTRUE) {
+            ESP_LOGI(TAG, "Network Response - Temperature: %.2f, Send Success: %s", 
+                     responseData.temperature, responseData.sendSuccess ? "Yes" : "No");
+        }
+
+        // Local temperature print
+        printf("Temperature: %.2f C\n", tempData.temperature);
+
+        vTaskDelay(pdMS_TO_TICKS(4500)); // Maintain 5-second total cycle
+    }
 }
+
+// Network Agent Task
+void network_agent_task(void *pvParameters) {
+    TemperatureData tempData;
+    
+    while (1) {
+        // Wait for temperature data
+        if (xQueueReceive(temperatureDataQueue, &tempData, portMAX_DELAY) == pdTRUE) {
+            // Prepare and send message
+            char message[64];
+            snprintf(message, sizeof(message), "Temperature: %.2f C, Timestamp: %lu\n", 
+                     tempData.temperature, tempData.timestamp);
+            
+            // Send temperature to collector
+            int sendResult = sendto(udp_socket, message, strlen(message), 0, 
+                                    (struct sockaddr *)&collector_addr, sizeof(collector_addr));
+            
+            // Update send success status
+            tempData.sendSuccess = (sendResult >= 0);
+            
+            if (sendResult < 0) {
+                ESP_LOGE(TAG, "Failed to send temperature data");
+            }
+
+            // Send response back to data acquisition task
+            xQueueSend(networkResponseQueue, &tempData, pdMS_TO_TICKS(100));
+        }
+    }
+}
+
+// Main Application Entry Point
 void app_main() {
+    // Initialize Non-Volatile Storage
     ESP_ERROR_CHECK(nvs_flash_init());
 
+    // Initialize Peripherals and Network
     wifi_init_sta();
     init_adc();
     init_led();
     init_udp_socket();
 
-    while (1) {
-        float temperature = read_temperature();
+    // Create Queues
+    temperatureDataQueue = xQueueCreate(QUEUE_LENGTH, sizeof(TemperatureData));
+    networkResponseQueue = xQueueCreate(QUEUE_LENGTH, sizeof(TemperatureData));
 
-        // Print temperature locally
-        printf("Temperature: %.2f C\n", temperature);
-
-        // Send temperature to collector
-        send_temperature(temperature);
-
-        // Flash the LED
-        flash_led();
-
-        // Delay for 5 seconds
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    if (temperatureDataQueue == NULL || networkResponseQueue == NULL) {
+        ESP_LOGE(TAG, "Failed to create queues");
+        return;
     }
+
+    // Create Tasks with Different Priorities
+    xTaskCreate(data_acquisition_task, "DataAcquisitionTask", 4096, 
+                NULL, DATA_ACQUISITION_PRIORITY, NULL);
+    xTaskCreate(network_agent_task, "NetworkAgentTask", 4096, 
+                NULL, NETWORK_AGENT_PRIORITY, NULL);
 }
