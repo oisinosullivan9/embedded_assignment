@@ -1,7 +1,7 @@
 import socket
 
 # Replace with your laptop's IP and the port number
-HOST = "192.168.155.61"  # Listen on all network interfaces
+HOST = "192.168.150.61"  # Listen on all network interfaces
 PORT = 12345
 
 def main():
