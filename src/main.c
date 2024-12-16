@@ -22,12 +22,13 @@
 #define LED_GPIO GPIO_NUM_2
 #define WIFI_SSID "AndroidAP7681"
 #define WIFI_PASSWORD "87654321"
-#define COLLECTOR_IP "192.168.155.61"
+#define COLLECTOR_IP "192.168.150.61"  //"192.168.155.61" this value changes!
 #define COLLECTOR_PORT 12345
 
 // Task Priorities
 #define DATA_ACQUISITION_PRIORITY (configMAX_PRIORITIES - 1)
 #define NETWORK_AGENT_PRIORITY (configMAX_PRIORITIES - 2)
+#define LED_PATTERN_PRIORITY (configMAX_PRIORITIES - 3)
 
 // Queue Configuration
 #define QUEUE_LENGTH 10
@@ -53,6 +54,13 @@ typedef struct {
     bool sendSuccess;
 } TemperatureData;
 
+// LED Pattern Context
+typedef struct {
+    uint8_t patternState;
+    bool isInverted;
+    TickType_t lastUpdateTime;
+} LEDPatternContext;
+
 // WiFi Event Handler
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, 
                                 int32_t event_id, void *event_data) {
@@ -64,6 +72,36 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+// LED Pattern Generation Task
+void led_pattern_task(void *pvParameters) {
+    LEDPatternContext context = {
+        .patternState = 0,
+        .isInverted = false,
+        .lastUpdateTime = 0
+    };
+
+    while (1) {
+        TickType_t currentTime = xTaskGetTickCount();
+        
+        // Pattern update interval (250ms)
+        if ((currentTime - context.lastUpdateTime) >= pdMS_TO_TICKS(250)) {
+            context.lastUpdateTime = currentTime;
+
+            // Breathing pattern
+            context.patternState = (context.patternState + 1) % 16;
+            context.isInverted = (context.patternState >= 8);
+            
+            uint8_t intensity = context.isInverted 
+                ? 16 - (context.patternState - 8)
+                : context.patternState;
+            
+            gpio_set_level(LED_GPIO, intensity > 8 ? 1 : 0);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10)); // Prevent task starvation
     }
 }
 
@@ -127,13 +165,6 @@ void init_led() {
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 }
 
-// LED Flashing
-void flash_led() {
-    gpio_set_level(LED_GPIO, 1); // Turn LED on
-    vTaskDelay(pdMS_TO_TICKS(500)); // Shorter delay for visual feedback
-    gpio_set_level(LED_GPIO, 0); // Turn LED off
-}
-
 // Temperature Reading
 float read_temperature() {
     int raw_adc = 0;
@@ -172,9 +203,6 @@ void data_acquisition_task(void *pvParameters) {
         tempData.temperature = read_temperature();
         tempData.timestamp = xTaskGetTickCount();
         tempData.sendSuccess = false;
-
-        // Flash LED
-        flash_led();
 
         // Send to network agent queue
         if (xQueueSend(temperatureDataQueue, &tempData, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -249,4 +277,6 @@ void app_main() {
                 NULL, DATA_ACQUISITION_PRIORITY, NULL);
     xTaskCreate(network_agent_task, "NetworkAgentTask", 4096, 
                 NULL, NETWORK_AGENT_PRIORITY, NULL);
+    xTaskCreate(led_pattern_task, "LEDPatternTask", 4096, 
+                NULL, LED_PATTERN_PRIORITY, NULL);
 }
