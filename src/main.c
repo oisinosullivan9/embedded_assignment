@@ -25,7 +25,8 @@
 #define COLLECTOR_IP "192.168.197.61"  //change to your IP
 #define COLLECTOR_PORT 12345
 
-// Task Priorities
+// Task Priorities 
+// (Lower number means higher priority)
 #define DATA_ACQUISITION_PRIORITY (configMAX_PRIORITIES - 1)
 #define NETWORK_AGENT_PRIORITY (configMAX_PRIORITIES - 2)
 #define LED_PATTERN_PRIORITY (configMAX_PRIORITIES - 3)
