@@ -22,7 +22,7 @@
 #define LED_GPIO GPIO_NUM_2
 #define WIFI_SSID "AndroidAP7681"
 #define WIFI_PASSWORD "87654321"
-#define COLLECTOR_IP "192.168.150.61"  //"192.168.155.61" this value changes!
+#define COLLECTOR_IP "192.168.113.61"  //change to your IP
 #define COLLECTOR_PORT 12345
 
 // Task Priorities
