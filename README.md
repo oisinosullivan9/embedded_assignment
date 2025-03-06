@@ -45,7 +45,7 @@ This project is a real-time Internet of Things (IoT) application designed for mo
     - Update `HOST` in the `collector.py` script with your laptop’s IP address.
     - Run the script:
       ```bash
-      python wifi_ollector.py
+      python wifi_collector.py
       ```
 
 5. Power up the ESP32 and start monitoring.
